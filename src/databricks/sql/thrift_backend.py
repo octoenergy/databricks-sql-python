@@ -1,16 +1,18 @@
-from decimal import Decimal
 import errno
 import logging
 import math
+import os
 import time
 import uuid
 import threading
 from ssl import CERT_NONE, CERT_REQUIRED, create_default_context
 from typing import List, Union
 
+import databricks.sql.auth.thrift_http_client
+import lz4.frame
 import pyarrow
-import thrift.transport.THttpClient
 import thrift.protocol.TBinaryProtocol
+import thrift.transport.THttpClient
 import thrift.transport.TSocket
 import thrift.transport.TTransport
 
@@ -54,6 +56,10 @@ DATABRICKS_ERROR_OR_REDIRECT_HEADER = "x-databricks-error-or-redirect-message"
 DATABRICKS_REASON_HEADER = "x-databricks-reason-phrase"
 
 TIMESTAMP_AS_STRING_CONFIG = "spark.thriftserver.arrowBasedRowSet.timestampAsString"
+
+# HACK!
+THRIFT_SOCKET_TIMEOUT = os.getenv("THRIFT_SOCKET_TIMEOUT", None)
+
 DEFAULT_SOCKET_TIMEOUT = float(900)
 
 # see Connection.__init__ for parameter descriptions.
@@ -145,13 +151,9 @@ class ThriftBackend:
 
         self.staging_allowed_local_path = staging_allowed_local_path
         self._initialize_retry_args(kwargs)
-        self._use_arrow_native_complex_types = kwargs.get(
-            "_use_arrow_native_complex_types", True
-        )
+        self._use_arrow_native_complex_types = kwargs.get("_use_arrow_native_complex_types", True)
         self._use_arrow_native_decimals = kwargs.get("_use_arrow_native_decimals", True)
-        self._use_arrow_native_timestamps = kwargs.get(
-            "_use_arrow_native_timestamps", True
-        )
+        self._use_arrow_native_timestamps = kwargs.get("_use_arrow_native_timestamps", True)
 
         # Cloud fetch
         self.max_download_threads = kwargs.get("max_download_threads", 10)
@@ -204,7 +206,7 @@ class ThriftBackend:
             **additional_transport_args,  # type: ignore
         )
 
-        timeout = kwargs.get("_socket_timeout", DEFAULT_SOCKET_TIMEOUT)
+        timeout = THRIFT_SOCKET_TIMEOUT or kwargs.get("_socket_timeout", DEFAULT_SOCKET_TIMEOUT)
         # setTimeout defaults to 15 minutes and is expected in ms
         self._transport.setTimeout(timeout and (float(timeout) * 1000.0))
 
@@ -228,15 +230,11 @@ class ThriftBackend:
             given_or_default = type_(kwargs.get(key, default))
             bound = _bound(min, max, given_or_default)
             setattr(self, key, bound)
-            logger.debug(
-                "retry parameter: {} given_or_default {}".format(key, given_or_default)
-            )
+            logger.debug("retry parameter: {} given_or_default {}".format(key, given_or_default))
             if bound != given_or_default:
                 logger.warning(
                     "Override out of policy retry parameter: "
-                    + "{} given {}, restricted to {}".format(
-                        key, given_or_default, bound
-                    )
+                    + "{} given {}, restricted to {}".format(key, given_or_default, bound)
                 )
 
         # Fail on retry delay min > max; consider later adding fail on min > duration?
@@ -264,9 +262,7 @@ class ThriftBackend:
         if THRIFT_ERROR_MESSAGE_HEADER in headers:
             err_msg = headers[THRIFT_ERROR_MESSAGE_HEADER]
         if DATABRICKS_ERROR_OR_REDIRECT_HEADER in headers:
-            if (
-                err_msg
-            ):  # We don't expect both to be set, but log both here just in case
+            if err_msg:  # We don't expect both to be set, but log both here just in case
                 err_msg = "Thriftserver error: {}, Databricks error: {}".format(
                     err_msg, headers[DATABRICKS_ERROR_OR_REDIRECT_HEADER]
                 )
@@ -501,10 +497,7 @@ class ThriftBackend:
         if not (catalog or schema):
             return
 
-        if (
-            response.serverProtocolVersion
-            < ttypes.TProtocolVersion.SPARK_CLI_SERVICE_PROTOCOL_V4
-        ):
+        if response.serverProtocolVersion < ttypes.TProtocolVersion.SPARK_CLI_SERVICE_PROTOCOL_V4:
             raise InvalidServerResponseError(
                 "Setting initial namespace not supported by the DBR version, "
                 "Please use a Databricks SQL endpoint or a cluster with DBR >= 9.0."
@@ -519,10 +512,7 @@ class ThriftBackend:
 
     def _check_session_configuration(self, session_configuration):
         # This client expects timetampsAsString to be false, so we do not allow users to modify that
-        if (
-            session_configuration.get(TIMESTAMP_AS_STRING_CONFIG, "false").lower()
-            != "false"
-        ):
+        if session_configuration.get(TIMESTAMP_AS_STRING_CONFIG, "false").lower() != "false":
             raise Error(
                 "Invalid session configuration: {} cannot be changed "
                 "while using the Databricks SQL connector, it must be false not {}".format(
@@ -534,18 +524,14 @@ class ThriftBackend:
     def open_session(self, session_configuration, catalog, schema):
         try:
             self._transport.open()
-            session_configuration = {
-                k: str(v) for (k, v) in (session_configuration or {}).items()
-            }
+            session_configuration = {k: str(v) for (k, v) in (session_configuration or {}).items()}
             self._check_session_configuration(session_configuration)
             # We want to receive proper Timestamp arrow types.
             # We set it also in confOverlay in TExecuteStatementReq on a per query basic,
             # but it doesn't hurt to also set for the whole session.
             session_configuration[TIMESTAMP_AS_STRING_CONFIG] = "false"
             if catalog or schema:
-                initial_namespace = ttypes.TNamespace(
-                    catalogName=catalog, schemaName=schema
-                )
+                initial_namespace = ttypes.TNamespace(catalogName=catalog, schemaName=schema)
             else:
                 initial_namespace = None
 
@@ -571,9 +557,7 @@ class ThriftBackend:
         finally:
             self._transport.close()
 
-    def _check_command_not_in_error_or_closed_state(
-        self, op_handle, get_operations_resp
-    ):
+    def _check_command_not_in_error_or_closed_state(self, op_handle, get_operations_resp):
         if get_operations_resp.operationState == ttypes.TOperationState.ERROR_STATE:
             if get_operations_resp.displayMessage:
                 raise ServerOperationError(
@@ -660,9 +644,7 @@ class ThriftBackend:
             else:
                 # Current thriftserver implementation should always return a primitiveEntry,
                 # even for complex types
-                raise OperationalError(
-                    "Thrift protocol error: t_type_entry not a primitiveEntry"
-                )
+                raise OperationalError("Thrift protocol error: t_type_entry not a primitiveEntry")
 
         def convert_col(t_column_desc):
             return pyarrow.field(
@@ -680,9 +662,7 @@ class ThriftBackend:
             # Drop _TYPE suffix
             cleaned_type = (name[:-5] if name.endswith("_TYPE") else name).lower()
         else:
-            raise OperationalError(
-                "Thrift protocol error: t_type_entry not a primitiveEntry"
-            )
+            raise OperationalError("Thrift protocol error: t_type_entry not a primitiveEntry")
 
         if type_entry.primitiveEntry.type == ttypes.TTypeId.DECIMAL_TYPE:
             qualifiers = type_entry.primitiveEntry.typeQualifiers.qualifiers
@@ -703,9 +683,7 @@ class ThriftBackend:
 
     @staticmethod
     def _hive_schema_to_description(t_table_schema):
-        return [
-            ThriftBackend._col_to_description(col) for col in t_table_schema.columns
-        ]
+        return [ThriftBackend._col_to_description(col) for col in t_table_schema.columns]
 
     def _results_message_to_execute_response(self, resp, operation_state):
         if resp.directResults and resp.directResults.resultSetMetadata:
@@ -733,9 +711,7 @@ class ThriftBackend:
             or (not direct_results.resultSet)
             or direct_results.resultSet.hasMoreRows
         )
-        description = self._hive_schema_to_description(
-            t_result_set_metadata_resp.schema
-        )
+        description = self._hive_schema_to_description(t_result_set_metadata_resp.schema)
         schema_bytes = (
             t_result_set_metadata_resp.arrowSchema
             or self._hive_schema_to_arrow_schema(t_result_set_metadata_resp.schema)
@@ -778,8 +754,7 @@ class ThriftBackend:
                 op_handle, initial_operation_status_resp
             )
         operation_state = (
-            initial_operation_status_resp
-            and initial_operation_status_resp.operationState
+            initial_operation_status_resp and initial_operation_status_resp.operationState
         )
         while not operation_state or operation_state in [
             ttypes.TOperationState.RUNNING_STATE,
@@ -794,21 +769,13 @@ class ThriftBackend:
     def _check_direct_results_for_error(t_spark_direct_results):
         if t_spark_direct_results:
             if t_spark_direct_results.operationStatus:
-                ThriftBackend._check_response_for_error(
-                    t_spark_direct_results.operationStatus
-                )
+                ThriftBackend._check_response_for_error(t_spark_direct_results.operationStatus)
             if t_spark_direct_results.resultSetMetadata:
-                ThriftBackend._check_response_for_error(
-                    t_spark_direct_results.resultSetMetadata
-                )
+                ThriftBackend._check_response_for_error(t_spark_direct_results.resultSetMetadata)
             if t_spark_direct_results.resultSet:
-                ThriftBackend._check_response_for_error(
-                    t_spark_direct_results.resultSet
-                )
+                ThriftBackend._check_response_for_error(t_spark_direct_results.resultSet)
             if t_spark_direct_results.closeOperation:
-                ThriftBackend._check_response_for_error(
-                    t_spark_direct_results.closeOperation
-                )
+                ThriftBackend._check_response_for_error(t_spark_direct_results.closeOperation)
 
     def execute_command(
         self,
@@ -838,9 +805,7 @@ class ThriftBackend:
             sessionHandle=session_handle,
             statement=operation,
             runAsync=True,
-            getDirectResults=ttypes.TSparkGetDirectResults(
-                maxRows=max_rows, maxBytes=max_bytes
-            ),
+            getDirectResults=ttypes.TSparkGetDirectResults(maxRows=max_rows, maxBytes=max_bytes),
             canReadArrowResult=True,
             canDecompressLZ4Result=lz4_compression,
             canDownloadResult=use_cloud_fetch,
@@ -858,9 +823,7 @@ class ThriftBackend:
 
         req = ttypes.TGetCatalogsReq(
             sessionHandle=session_handle,
-            getDirectResults=ttypes.TSparkGetDirectResults(
-                maxRows=max_rows, maxBytes=max_bytes
-            ),
+            getDirectResults=ttypes.TSparkGetDirectResults(maxRows=max_rows, maxBytes=max_bytes),
         )
         resp = self.make_request(self._client.GetCatalogs, req)
         return self._handle_execute_response(resp, cursor)
@@ -878,9 +841,7 @@ class ThriftBackend:
 
         req = ttypes.TGetSchemasReq(
             sessionHandle=session_handle,
-            getDirectResults=ttypes.TSparkGetDirectResults(
-                maxRows=max_rows, maxBytes=max_bytes
-            ),
+            getDirectResults=ttypes.TSparkGetDirectResults(maxRows=max_rows, maxBytes=max_bytes),
             catalogName=catalog_name,
             schemaName=schema_name,
         )
@@ -902,9 +863,7 @@ class ThriftBackend:
 
         req = ttypes.TGetTablesReq(
             sessionHandle=session_handle,
-            getDirectResults=ttypes.TSparkGetDirectResults(
-                maxRows=max_rows, maxBytes=max_bytes
-            ),
+            getDirectResults=ttypes.TSparkGetDirectResults(maxRows=max_rows, maxBytes=max_bytes),
             catalogName=catalog_name,
             schemaName=schema_name,
             tableName=table_name,
@@ -928,9 +887,7 @@ class ThriftBackend:
 
         req = ttypes.TGetColumnsReq(
             sessionHandle=session_handle,
-            getDirectResults=ttypes.TSparkGetDirectResults(
-                maxRows=max_rows, maxBytes=max_bytes
-            ),
+            getDirectResults=ttypes.TSparkGetDirectResults(maxRows=max_rows, maxBytes=max_bytes),
             catalogName=catalog_name,
             schemaName=schema_name,
             tableName=table_name,
