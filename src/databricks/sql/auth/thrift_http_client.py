@@ -5,6 +5,7 @@ from typing import Dict, Union
 
 import six
 import thrift
+import thrift.transport.THttpClient
 
 logger = logging.getLogger(__name__)
 
