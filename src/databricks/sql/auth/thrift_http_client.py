@@ -3,6 +3,7 @@ from typing import Dict
 
 
 import thrift
+import thrift.transport.THttpClient
 
 import urllib.parse, six, base64
 
