@@ -206,8 +206,12 @@ class ThriftBackend:
             **additional_transport_args,  # type: ignore
         )
 
-        timeout = THRIFT_SOCKET_TIMEOUT or kwargs.get("_socket_timeout", DEFAULT_SOCKET_TIMEOUT)
         # setTimeout defaults to 15 minutes and is expected in ms
+        # HACK!
+        timeout = THRIFT_SOCKET_TIMEOUT or kwargs.get("_socket_timeout", DEFAULT_SOCKET_TIMEOUT)
+        logger.info(f"Setting timeout HACK! to {timeout}")
+
+        # setTimeout defaults to None (i.e. no timeout), and is expected in ms
         self._transport.setTimeout(timeout and (float(timeout) * 1000.0))
 
         self._transport.setCustomHeaders(dict(http_headers))
