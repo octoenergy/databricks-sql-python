@@ -2,9 +2,10 @@ import errno
 import logging
 import math
 import os
-import time
 import uuid
-import threading
+import time
+from decimal import Decimal
+
 from ssl import CERT_NONE, CERT_REQUIRED, create_default_context
 from typing import List, Union
 
@@ -15,7 +16,6 @@ import thrift.protocol.TBinaryProtocol
 import thrift.transport.THttpClient
 import thrift.transport.TSocket
 import thrift.transport.TTransport
-
 import urllib3.exceptions
 
 import databricks.sql.auth.thrift_http_client
@@ -23,7 +23,6 @@ from databricks.sql.auth.thrift_http_client import CommandType
 from databricks.sql.auth.authenticators import AuthProvider
 from databricks.sql.thrift_api.TCLIService import TCLIService, ttypes
 from databricks.sql import *
-from databricks.sql.exc import MaxRetryDurationError
 from databricks.sql.thrift_api.TCLIService.TCLIService import (
     Client as TCLIServiceClient,
 )
@@ -154,7 +153,6 @@ class ThriftBackend:
         self._use_arrow_native_complex_types = kwargs.get("_use_arrow_native_complex_types", True)
         self._use_arrow_native_decimals = kwargs.get("_use_arrow_native_decimals", True)
         self._use_arrow_native_timestamps = kwargs.get("_use_arrow_native_timestamps", True)
-
         # Cloud fetch
         self.max_download_threads = kwargs.get("max_download_threads", 10)
 
@@ -206,8 +204,11 @@ class ThriftBackend:
             **additional_transport_args,  # type: ignore
         )
 
+        # HACK!
         timeout = THRIFT_SOCKET_TIMEOUT or kwargs.get("_socket_timeout", DEFAULT_SOCKET_TIMEOUT)
+        logger.info(f"Setting timeout HACK! to {timeout}")
         # setTimeout defaults to 15 minutes and is expected in ms
+
         self._transport.setTimeout(timeout and (float(timeout) * 1000.0))
 
         self._transport.setCustomHeaders(dict(http_headers))
