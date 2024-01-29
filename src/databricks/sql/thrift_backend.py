@@ -2,15 +2,14 @@ import errno
 import logging
 import math
 import os
+import threading
 import uuid
 import time
-from decimal import Decimal
 
 from ssl import CERT_NONE, CERT_REQUIRED, create_default_context
 from typing import List, Union
 
 import databricks.sql.auth.thrift_http_client
-import lz4.frame
 import pyarrow
 import thrift.protocol.TBinaryProtocol
 import thrift.transport.THttpClient
