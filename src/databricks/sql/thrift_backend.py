@@ -54,6 +54,10 @@ DATABRICKS_ERROR_OR_REDIRECT_HEADER = "x-databricks-error-or-redirect-message"
 DATABRICKS_REASON_HEADER = "x-databricks-reason-phrase"
 
 TIMESTAMP_AS_STRING_CONFIG = "spark.thriftserver.arrowBasedRowSet.timestampAsString"
+
+# HACK!
+THRIFT_SOCKET_TIMEOUT = os.getenv("THRIFT_SOCKET_TIMEOUT", None)
+
 DEFAULT_SOCKET_TIMEOUT = float(900)
 
 # see Connection.__init__ for parameter descriptions.
@@ -227,7 +231,12 @@ class ThriftBackend:
             **additional_transport_args,  # type: ignore
         )
 
-        timeout = kwargs.get("_socket_timeout", DEFAULT_SOCKET_TIMEOUT)
+        timeout = THRIFT_SOCKET_TIMEOUT or kwargs.get(
+            "_socket_timeout", DEFAULT_SOCKET_TIMEOUT
+        )
+        # HACK!
+        logger.info(f"Setting timeout HACK! to {timeout}")
+
         # setTimeout defaults to 15 minutes and is expected in ms
         self._transport.setTimeout(timeout and (float(timeout) * 1000.0))
 
@@ -637,7 +646,10 @@ class ThriftBackend:
                 num_rows,
             ) = convert_column_based_set_to_arrow_table(t_row_set.columns, description)
         elif t_row_set.arrowBatches is not None:
-            (arrow_table, num_rows,) = convert_arrow_based_set_to_arrow_table(
+            (
+                arrow_table,
+                num_rows,
+            ) = convert_arrow_based_set_to_arrow_table(
                 t_row_set.arrowBatches, lz4_compressed, schema_bytes
             )
         else:
