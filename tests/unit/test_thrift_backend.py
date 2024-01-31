@@ -66,7 +66,7 @@ class ThriftBackendTestSuite(unittest.TestCase):
             thrift_backend.make_request(mock_method, Mock())
 
     def _make_type_desc(self, type):
-        return ttypes.TTypeDesc(types=[ttypes.TTypeEntry(ttypes.TPrimitiveTypeEntry(type=type))])
+        return ttypes.TTypeDesc(types=[ttypes.TTypeEntry(ttypes.TTAllowedParameterValueEntry(type=type))])
 
     def _make_fake_thrift_backend(self):
         thrift_backend = ThriftBackend("foobar", 443, "path", [], auth_provider=AuthProvider())
@@ -213,6 +213,18 @@ class ThriftBackendTestSuite(unittest.TestCase):
                          "https://hostname:123/path_value")
 
     @patch("databricks.sql.auth.thrift_http_client.THttpClient")
+    def test_host_with_https_does_not_duplicate(self, t_http_client_class):
+        ThriftBackend("https://hostname", 123, "path_value", [], auth_provider=AuthProvider())
+        self.assertEqual(t_http_client_class.call_args[1]["uri_or_host"],
+                         "https://hostname:123/path_value")
+        
+    @patch("databricks.sql.auth.thrift_http_client.THttpClient")
+    def test_host_with_trailing_backslash_does_not_duplicate(self, t_http_client_class):
+        ThriftBackend("https://hostname/", 123, "path_value", [], auth_provider=AuthProvider())
+        self.assertEqual(t_http_client_class.call_args[1]["uri_or_host"],
+                         "https://hostname:123/path_value")        
+
+    @patch("databricks.sql.auth.thrift_http_client.THttpClient")
     def test_socket_timeout_is_propagated(self, t_http_client_class):
         ThriftBackend("hostname", 123, "path_value", [], auth_provider=AuthProvider(), _socket_timeout=129)
         self.assertEqual(t_http_client_class.return_value.setTimeout.call_args[0][0], 129 * 1000)
@@ -270,7 +282,7 @@ class ThriftBackendTestSuite(unittest.TestCase):
                 columnName="column 1",
                 typeDesc=ttypes.TTypeDesc(types=[
                     ttypes.TTypeEntry(
-                        ttypes.TPrimitiveTypeEntry(
+                        ttypes.TTAllowedParameterValueEntry(
                             type=ttypes.TTypeId.DECIMAL_TYPE,
                             typeQualifiers=ttypes.TTypeQualifiers(
                                 qualifiers={

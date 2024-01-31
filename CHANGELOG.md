@@ -1,6 +1,42 @@
 # Release History
 
-## 2.9.4 (Unreleased)
+# 3.0.2 (2024-01-25)
+
+- SQLAlchemy dialect now supports table and column comments (thanks @cbornet!)
+- Fix: SQLAlchemy dialect now correctly reflects TINYINT types (thanks @TimTheinAtTabs!)
+- Fix: `server_hostname` URIs that included `https://` would raise an exception
+- Other: pinned to `pandas<=2.1` and `urllib3>=1.26` to avoid runtime errors in dbt-databricks (#330)
+
+## 3.0.1 (2023-12-01)
+
+- Other: updated docstring comment about default parameterization approach (#287)
+- Other: added tests for reading complex types and revised docstrings and type hints (#293)
+- Fix: SQLAlchemy dialect raised DeprecationWarning due to `dbapi` classmethod (#294)
+- Fix: SQLAlchemy dialect could not reflect TIMESTAMP_NTZ columns (#296)
+
+## 3.0.0 (2023-11-17)
+
+- Remove support for Python 3.7
+- Add support for native parameterized SQL queries. Requires DBR 14.2 and above. See docs/parameters.md for more info.
+- Completely rewritten SQLAlchemy dialect
+  - Adds support for SQLAlchemy >= 2.0 and drops support for SQLAlchemy 1.x
+  - Full e2e test coverage of all supported features
+  - Detailed usage notes in `README.sqlalchemy.md`
+  - Adds support for:
+    - New types: `TIME`, `TIMESTAMP`, `TIMESTAMP_NTZ`, `TINYINT`
+    - `Numeric` type scale and precision, like `Numeric(10,2)`
+    - Reading and writing `PrimaryKeyConstraint` and `ForeignKeyConstraint`
+    - Reading and writing composite keys
+    - Reading and writing from views
+    - Writing `Identity` to tables (i.e. autoincrementing primary keys)
+    - `LIMIT` and `OFFSET` for paging through results
+    - Caching metadata calls
+- Enable cloud fetch by default. To disable, set `use_cloud_fetch=False` when building `databricks.sql.client`.
+- Add integration tests for Databricks UC Volumes ingestion queries
+- Retries:
+  - Add `_retry_max_redirects` config
+  - Set `_enable_v3_retries=True` and warn if users override it
+- Security: bump minimum pyarrow version to 14.0.1 (CVE-2023-47248)
 
 ## 2.9.3 (2023-08-24)
 
@@ -8,17 +44,21 @@
 
 ## 2.9.2 (2023-08-17)
 
+__Note: this release was yanked from Pypi on 13 September 2023 due to compatibility issues with environments where `urllib3<=2.0.0` were installed. The log changes are incorporated into version 2.9.3 and greater.__
+
 - Other: Add `examples/v3_retries_query_execute.py` (#199)
 - Other: suppress log message when `_enable_v3_retries` is not `True` (#199)
 - Other: make this connector backwards compatible with `urllib3>=1.0.0` (#197)
 
 ## 2.9.1 (2023-08-11)
 
+__Note: this release was yanked from Pypi on 13 September 2023 due to compatibility issues with environments where `urllib3<=2.0.0` were installed.__
+
 - Other: Explicitly pin urllib3 to ^2.0.0 (#191)
 
 ## 2.9.0 (2023-08-10)
 
-- Replace retry handling with DatabricksRetryPolicy. This is disabled by default. To enable, set `enable_v3_retries=True` when creating `databricks.sql.client` (#182)
+- Replace retry handling with DatabricksRetryPolicy. This is disabled by default. To enable, set `_enable_v3_retries=True` when creating `databricks.sql.client` (#182)
 - Other: Fix typo in README quick start example (#186)
 - Other: Add autospec to Client mocks and tidy up `make_request` (#188)
 

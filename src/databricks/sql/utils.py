@@ -1,23 +1,33 @@
-from abc import ABC, abstractmethod
-from collections import namedtuple, OrderedDict
-from collections.abc import Iterable
-from decimal import Decimal
+from __future__ import annotations
+
 import datetime
 import decimal
+from abc import ABC, abstractmethod
+from collections import OrderedDict, namedtuple
+from collections.abc import Iterable
+from decimal import Decimal
 from enum import Enum
+from typing import Any, Dict, List, Union
+import re
+
 import lz4.frame
-from typing import Dict, List, Union, Any
 import pyarrow
 
-from databricks.sql import exc, OperationalError
+from databricks.sql import OperationalError, exc
 from databricks.sql.cloudfetch.download_manager import ResultFileDownloadManager
 from databricks.sql.thrift_api.TCLIService.ttypes import (
+    TRowSet,
     TSparkArrowResultLink,
     TSparkRowSetType,
-    TRowSet,
 )
 
+from databricks.sql.parameters.native import ParameterStructure, TDbsqlParameter
+
 BIT_MASKS = [1, 2, 4, 8, 16, 32, 64, 128]
+
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class ResultSetQueue(ABC):
@@ -376,6 +386,95 @@ def inject_parameters(operation: str, parameters: Dict[str, str]):
     return operation % parameters
 
 
+def _dbsqlparameter_names(params: List[TDbsqlParameter]) -> list[str]:
+    return [p.name if p.name else "" for p in params]
+
+
+def _generate_named_interpolation_values(
+    params: List[TDbsqlParameter],
+) -> dict[str, str]:
+    """Returns a dictionary of the form {name: ":name"} for each parameter in params"""
+
+    names = _dbsqlparameter_names(params)
+
+    return {name: f":{name}" for name in names}
+
+
+def _may_contain_inline_positional_markers(operation: str) -> bool:
+    """Check for the presence of `%s` in the operation string."""
+
+    interpolated = operation.replace("%s", "?")
+    return interpolated != operation
+
+
+def _interpolate_named_markers(
+    operation: str, parameters: List[TDbsqlParameter]
+) -> str:
+    """Replace all instances of `%(param)s` in `operation` with `:param`.
+
+    If `operation` contains no instances of `%(param)s` then the input string is returned unchanged.
+
+    ```
+    "SELECT * FROM table WHERE field = %(field)s and other_field = %(other_field)s"
+    ```
+
+    Yields
+
+    ```
+    SELECT * FROM table WHERE field = :field and other_field = :other_field
+    ```
+    """
+
+    _output_operation = operation
+
+    PYFORMAT_PARAMSTYLE_REGEX = r"%\((\w+)\)s"
+    pat = re.compile(PYFORMAT_PARAMSTYLE_REGEX)
+    NAMED_PARAMSTYLE_FMT = ":{}"
+    PYFORMAT_PARAMSTYLE_FMT = "%({})s"
+
+    pyformat_markers = pat.findall(operation)
+    for marker in pyformat_markers:
+        pyformat_marker = PYFORMAT_PARAMSTYLE_FMT.format(marker)
+        named_marker = NAMED_PARAMSTYLE_FMT.format(marker)
+        _output_operation = _output_operation.replace(pyformat_marker, named_marker)
+
+    return _output_operation
+
+
+def transform_paramstyle(
+    operation: str,
+    parameters: List[TDbsqlParameter],
+    param_structure: ParameterStructure,
+) -> str:
+    """
+    Performs a Python string interpolation such that any occurence of `%(param)s` will be replaced with `:param`
+
+    This utility function is built to assist users in the transition between the default paramstyle in
+    this connector prior to version 3.0.0 (`pyformat`) and the new default paramstyle (`named`).
+
+    Args:
+        operation: The operation or SQL text to transform.
+        parameters: The parameters to use for the transformation.
+
+    Returns:
+        str
+    """
+    output = operation
+    if (
+        param_structure == ParameterStructure.POSITIONAL
+        and _may_contain_inline_positional_markers(operation)
+    ):
+        logger.warning(
+            "It looks like this query may contain un-named query markers like `%s`"
+            " This format is not supported when use_inline_params=False."
+            " Use `?` instead or set use_inline_params=True"
+        )
+    elif param_structure == ParameterStructure.NAMED:
+        output = _interpolate_named_markers(operation, parameters)
+
+    return output
+
+
 def create_arrow_table_from_arrow_file(file_bytes: bytes, description) -> pyarrow.Table:
     arrow_table = convert_arrow_based_file_to_arrow_table(file_bytes)
     return convert_decimals_in_arrow_table(arrow_table, description)
@@ -404,7 +503,7 @@ def convert_arrow_based_set_to_arrow_table(arrow_batches, lz4_compressed, schema
 
 
 def convert_decimals_in_arrow_table(table, description) -> pyarrow.Table:
-    for (i, col) in enumerate(table.itercolumns()):
+    for i, col in enumerate(table.itercolumns()):
         if description[i][1] == "decimal":
             decimal_col = col.to_pandas().apply(
                 lambda v: v if v is None else Decimal(v)

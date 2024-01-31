@@ -5,7 +5,8 @@ from databricks.sql.exc import *
 # PEP 249 module globals
 apilevel = "2.0"
 threadsafety = 1  # Threads may share the module, but not connections.
-paramstyle = "pyformat"  # Python extended format codes, e.g. ...WHERE name=%(name)s
+
+paramstyle = "named"
 
 
 class DBAPITypeObject(object):
@@ -28,7 +29,7 @@ DATETIME = DBAPITypeObject("timestamp")
 DATE = DBAPITypeObject("date")
 ROWID = DBAPITypeObject()
 
-__version__ = "2.9.3"
+__version__ = "3.0.2"
 USER_AGENT_NAME = "PyDatabricksSqlConnector"
 
 # These two functions are pyhive legacy
