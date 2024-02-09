@@ -1,25 +1,12 @@
-import datetime
-import decimal
-import os
-from typing import Tuple, Union, List
-from unittest import skipIf
-
+import os, datetime, decimal
 import pytest
-from sqlalchemy import (
-    Column,
-    MetaData,
-    Table,
-    Text,
-    create_engine,
-    insert,
-    select,
-    text,
-)
+from unittest import skipIf
+from sqlalchemy import create_engine, select, insert, Column, MetaData, Table
+from sqlalchemy.orm import Session
+from sqlalchemy.types import SMALLINT, Integer, BOOLEAN, String, DECIMAL, Date
 from sqlalchemy.engine import Engine
-from sqlalchemy.engine.reflection import Inspector
-from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
-from sqlalchemy.schema import DropColumnComment, SetColumnComment
-from sqlalchemy.types import BOOLEAN, DECIMAL, Date, DateTime, Integer, String
+
+from typing import Tuple
 
 try:
     from sqlalchemy.orm import declarative_base
@@ -50,6 +37,7 @@ def version_agnostic_select(object_to_select, *args, **kwargs):
 
 
 def version_agnostic_connect_arguments(catalog=None, schema=None) -> Tuple[str, dict]:
+
     HOST = os.environ.get("host")
     HTTP_PATH = os.environ.get("http_path")
     ACCESS_TOKEN = os.environ.get("access_token")
@@ -82,17 +70,9 @@ def db_engine() -> Engine:
     return create_engine(conn_string, connect_args=connect_args)
 
 
-def run_query(db_engine: Engine, query: Union[str, Text]):
-    if not isinstance(query, Text):
-        _query = text(query)  # type: ignore
-    else:
-        _query = query  # type: ignore
-    with db_engine.begin() as conn:
-        return conn.execute(_query).fetchall()
-
-
 @pytest.fixture
 def samples_engine() -> Engine:
+
     conn_string, connect_args = version_agnostic_connect_arguments(
         catalog="samples", schema="nyctaxi"
     )
@@ -101,22 +81,22 @@ def samples_engine() -> Engine:
 
 @pytest.fixture()
 def base(db_engine):
-    return declarative_base()
+    return declarative_base(bind=db_engine)
 
 
 @pytest.fixture()
 def session(db_engine):
-    return Session(db_engine)
+    return Session(bind=db_engine)
 
 
 @pytest.fixture()
 def metadata_obj(db_engine):
-    return MetaData()
+    return MetaData(bind=db_engine)
 
 
 def test_can_connect(db_engine):
     simple_query = "SELECT 1"
-    result = run_query(db_engine, simple_query)
+    result = db_engine.execute(simple_query).fetchall()
     assert len(result) == 1
 
 
@@ -135,17 +115,13 @@ def test_connect_args(db_engine):
 
 
 @pytest.mark.skipif(sqlalchemy_1_3(), reason="Pandas requires SQLAlchemy >= 1.4")
-@pytest.mark.skip(
-    reason="DBR is currently limited to 256 parameters per call to .execute(). Test cannot pass."
-)
 def test_pandas_upload(db_engine, metadata_obj):
+
     import pandas as pd
 
     SCHEMA = os.environ.get("schema")
     try:
-        df = pd.read_excel(
-            "src/databricks/sqlalchemy/test_local/e2e/demo_data/MOCK_DATA.xlsx"
-        )
+        df = pd.read_excel("tests/sqlalchemy/demo_data/MOCK_DATA.xlsx")
         df.to_sql(
             "mock_data",
             db_engine,
@@ -164,6 +140,7 @@ def test_pandas_upload(db_engine, metadata_obj):
 
 
 def test_create_table_not_null(db_engine, metadata_obj: MetaData):
+
     table_name = "PySQLTest_{}".format(datetime.datetime.utcnow().strftime("%s"))
 
     SampleTable = Table(
@@ -174,7 +151,7 @@ def test_create_table_not_null(db_engine, metadata_obj: MetaData):
         Column("some_bool", BOOLEAN, nullable=False),
     )
 
-    metadata_obj.create_all(db_engine)
+    metadata_obj.create_all()
 
     columns = db_engine.dialect.get_columns(
         connection=db_engine.connect(), table_name=table_name
@@ -186,49 +163,14 @@ def test_create_table_not_null(db_engine, metadata_obj: MetaData):
     assert name_column_description.get("nullable") is True
     assert some_bool_column_description.get("nullable") is False
 
-    metadata_obj.drop_all(db_engine)
-
-
-def test_column_comment(db_engine, metadata_obj: MetaData):
-    table_name = "PySQLTest_{}".format(datetime.datetime.utcnow().strftime("%s"))
-
-    column = Column("name", String(255), comment="some comment")
-    SampleTable = Table(table_name, metadata_obj, column)
-
-    metadata_obj.create_all(db_engine)
-    connection = db_engine.connect()
-
-    columns = db_engine.dialect.get_columns(
-        connection=connection, table_name=table_name
-    )
-
-    assert columns[0].get("comment") == "some comment"
-
-    column.comment = "other comment"
-    connection.execute(SetColumnComment(column))
-
-    columns = db_engine.dialect.get_columns(
-        connection=connection, table_name=table_name
-    )
-
-    assert columns[0].get("comment") == "other comment"
-
-    connection.execute(DropColumnComment(column))
-
-    columns = db_engine.dialect.get_columns(
-        connection=connection, table_name=table_name
-    )
-
-    assert columns[0].get("comment") == None
-
-    metadata_obj.drop_all(db_engine)
+    metadata_obj.drop_all()
 
 
 def test_bulk_insert_with_core(db_engine, metadata_obj, session):
+
     import random
 
-    # Maximum number of parameter is 256. 256/4 == 64
-    num_to_insert = 64
+    num_to_insert = random.choice(range(10_000, 20_000))
 
     table_name = "PySQLTest_{}".format(datetime.datetime.utcnow().strftime("%s"))
 
@@ -239,16 +181,14 @@ def test_bulk_insert_with_core(db_engine, metadata_obj, session):
     )
 
     rows = [
-        {"name": names[i % 3], "number": random.choice(range(64))}
+        {"name": names[i % 3], "number": random.choice(range(10000))}
         for i in range(num_to_insert)
     ]
 
-    metadata_obj.create_all(db_engine)
-    with db_engine.begin() as conn:
-        conn.execute(insert(SampleTable).values(rows))
+    metadata_obj.create_all()
+    db_engine.execute(insert(SampleTable).values(rows))
 
-    with db_engine.begin() as conn:
-        rows = conn.execute(version_agnostic_select(SampleTable)).fetchall()
+    rows = db_engine.execute(version_agnostic_select(SampleTable)).fetchall()
 
     assert len(rows) == num_to_insert
 
@@ -265,7 +205,7 @@ def test_create_insert_drop_table_core(base, db_engine, metadata_obj: MetaData):
         Column("dollars", DECIMAL(10, 2)),
     )
 
-    metadata_obj.create_all(db_engine)
+    metadata_obj.create_all()
 
     insert_stmt = insert(SampleTable).values(
         name="Bim Adewunmi", episodes=6, some_bool=True, dollars=decimal.Decimal(125)
@@ -275,14 +215,13 @@ def test_create_insert_drop_table_core(base, db_engine, metadata_obj: MetaData):
         conn.execute(insert_stmt)
 
     select_stmt = version_agnostic_select(SampleTable)
-    with db_engine.begin() as conn:
-        resp = conn.execute(select_stmt)
+    resp = db_engine.execute(select_stmt)
 
     result = resp.fetchall()
 
     assert len(result) == 1
 
-    metadata_obj.drop_all(db_engine)
+    metadata_obj.drop_all()
 
 
 # ORM tests are made following this tutorial
@@ -290,30 +229,26 @@ def test_create_insert_drop_table_core(base, db_engine, metadata_obj: MetaData):
 
 
 @skipIf(False, "Unity catalog must be supported")
-def test_create_insert_drop_table_orm(db_engine):
+def test_create_insert_drop_table_orm(base, session: Session):
     """ORM classes built on the declarative base class must have a primary key.
     This is restricted to Unity Catalog.
     """
 
-    class Base(DeclarativeBase):
-        pass
+    class SampleObject(base):
 
-    class SampleObject(Base):
         __tablename__ = "PySQLTest_{}".format(datetime.datetime.utcnow().strftime("%s"))
 
-        name: Mapped[str] = mapped_column(String(255), primary_key=True)
-        episodes: Mapped[int] = mapped_column(Integer)
-        some_bool: Mapped[bool] = mapped_column(BOOLEAN)
+        name = Column(String(255), primary_key=True)
+        episodes = Column(Integer)
+        some_bool = Column(BOOLEAN)
 
-    Base.metadata.create_all(db_engine)
+    base.metadata.create_all()
 
     sample_object_1 = SampleObject(name="Bim Adewunmi", episodes=6, some_bool=True)
     sample_object_2 = SampleObject(name="Miki Meek", episodes=12, some_bool=False)
-
-    session = Session(db_engine)
     session.add(sample_object_1)
     session.add(sample_object_2)
-    session.flush()
+    session.commit()
 
     stmt = version_agnostic_select(SampleObject).where(
         SampleObject.name.in_(["Bim Adewunmi", "Miki Meek"])
@@ -326,14 +261,11 @@ def test_create_insert_drop_table_orm(db_engine):
 
     assert len(output) == 2
 
-    Base.metadata.drop_all(db_engine)
+    base.metadata.drop_all()
 
 
-def test_dialect_type_mappings(db_engine, metadata_obj: MetaData):
+def test_dialect_type_mappings(base, db_engine, metadata_obj: MetaData):
     """Confirms that we get back the same time we declared in a model and inserted using Core"""
-
-    class Base(DeclarativeBase):
-        pass
 
     SampleTable = Table(
         "PySQLTest_{}".format(datetime.datetime.utcnow().strftime("%s")),
@@ -351,7 +283,7 @@ def test_dialect_type_mappings(db_engine, metadata_obj: MetaData):
     decimal_example = decimal.Decimal(125)
     date_example = datetime.date(2013, 1, 1)
 
-    metadata_obj.create_all(db_engine)
+    metadata_obj.create_all()
 
     insert_stmt = insert(SampleTable).values(
         string_example=string_example,
@@ -365,23 +297,24 @@ def test_dialect_type_mappings(db_engine, metadata_obj: MetaData):
         conn.execute(insert_stmt)
 
     select_stmt = version_agnostic_select(SampleTable)
-    with db_engine.begin() as conn:
-        resp = conn.execute(select_stmt)
+    resp = db_engine.execute(select_stmt)
 
     result = resp.fetchall()
     this_row = result[0]
 
-    assert this_row.string_example == string_example
-    assert this_row.integer_example == integer_example
-    assert this_row.boolean_example == boolean_example
-    assert this_row.decimal_example == decimal_example
-    assert this_row.date_example == date_example
+    assert this_row["string_example"] == string_example
+    assert this_row["integer_example"] == integer_example
+    assert this_row["boolean_example"] == boolean_example
+    assert this_row["decimal_example"] == decimal_example
+    assert this_row["date_example"] == date_example
 
-    metadata_obj.drop_all(db_engine)
+    metadata_obj.drop_all()
 
 
 def test_inspector_smoke_test(samples_engine: Engine):
     """It does not appear that 3L namespace is supported here"""
+
+    from sqlalchemy.engine.reflection import Inspector
 
     schema, table = "nyctaxi", "trips"
 
@@ -402,21 +335,22 @@ def test_inspector_smoke_test(samples_engine: Engine):
     assert len(views) == 0, "Views could not be fetched"
 
 
-@pytest.mark.skip(reason="engine.table_names has been removed in sqlalchemy verison 2")
 def test_get_table_names_smoke_test(samples_engine: Engine):
+
     with samples_engine.connect() as conn:
-        _names = samples_engine.table_names(schema="nyctaxi", connection=conn)  # type: ignore
+        _names = samples_engine.table_names(schema="nyctaxi", connection=conn)
         _names is not None, "get_table_names did not succeed"
 
 
 def test_has_table_across_schemas(db_engine: Engine, samples_engine: Engine):
     """For this test to pass these conditions must be met:
-    - Table samples.nyctaxi.trips must exist
-    - Table samples.tpch.customer must exist
-    - The `catalog` and `schema` environment variables must be set and valid
+        - Table samples.nyctaxi.trips must exist
+        - Table samples.tpch.customer must exist
+        - The `catalog` and `schema` environment variables must be set and valid
     """
 
     with samples_engine.connect() as conn:
+
         # 1) Check for table within schema declared at engine creation time
         assert samples_engine.dialect.has_table(connection=conn, table_name="trips")
 
@@ -431,7 +365,7 @@ def test_has_table_across_schemas(db_engine: Engine, samples_engine: Engine):
 
         # Create a table in a different catalog
         with db_engine.connect() as conn:
-            conn.execute(text("CREATE TABLE test_has_table (numbers_are_cool INT);"))
+            conn.execute("CREATE TABLE test_has_table (numbers_are_cool INT);")
 
             try:
                 # Verify that this table is not found in the samples catalog
@@ -446,99 +380,4 @@ def test_has_table_across_schemas(db_engine: Engine, samples_engine: Engine):
                     catalog=other_catalog,
                 )
             finally:
-                conn.execute(text("DROP TABLE test_has_table;"))
-
-
-def test_user_agent_adjustment(db_engine):
-    # If .connect() is called multiple times on an engine, don't keep pre-pending the user agent
-    # https://github.com/databricks/databricks-sql-python/issues/192
-    c1 = db_engine.connect()
-    c2 = db_engine.connect()
-
-    def get_conn_user_agent(conn):
-        return conn.connection.dbapi_connection.thrift_backend._transport._headers.get(
-            "User-Agent"
-        )
-
-    ua1 = get_conn_user_agent(c1)
-    ua2 = get_conn_user_agent(c2)
-    same_ua = ua1 == ua2
-
-    c1.close()
-    c2.close()
-
-    assert same_ua, f"User agents didn't match \n {ua1} \n {ua2}"
-
-
-@pytest.fixture
-def sample_table(metadata_obj: MetaData, db_engine: Engine):
-    """This fixture creates a sample table and cleans it up after the test is complete."""
-    from databricks.sqlalchemy._parse import GET_COLUMNS_TYPE_MAP
-
-    table_name = "PySQLTest_{}".format(datetime.datetime.utcnow().strftime("%s"))
-
-    args: List[Column] = [
-        Column(colname, coltype) for colname, coltype in GET_COLUMNS_TYPE_MAP.items()
-    ]
-
-    SampleTable = Table(table_name, metadata_obj, *args)
-
-    metadata_obj.create_all(db_engine)
-
-    yield table_name
-
-    metadata_obj.drop_all(db_engine)
-
-
-def test_get_columns(db_engine, sample_table: str):
-    """Created after PECO-1297 and Github Issue #295 to verify that get_columsn behaves like it should for all known SQLAlchemy types"""
-
-    inspector = Inspector.from_engine(db_engine)
-
-    # this raises an exception if `parse_column_info_from_tgetcolumnsresponse` fails a lookup
-    columns = inspector.get_columns(sample_table)
-
-    assert True
-
-
-class TestCommentReflection:
-    @pytest.fixture(scope="class")
-    def engine(self):
-        HOST = os.environ.get("host")
-        HTTP_PATH = os.environ.get("http_path")
-        ACCESS_TOKEN = os.environ.get("access_token")
-        CATALOG = os.environ.get("catalog")
-        SCHEMA = os.environ.get("schema")
-
-        connection_string = f"databricks://token:{ACCESS_TOKEN}@{HOST}?http_path={HTTP_PATH}&catalog={CATALOG}&schema={SCHEMA}"
-        connect_args = {"_user_agent_entry": USER_AGENT_TOKEN}
-
-        engine = create_engine(connection_string, connect_args=connect_args)
-        return engine
-
-    @pytest.fixture
-    def inspector(self, engine: Engine) -> Inspector:
-        return Inspector.from_engine(engine)
-
-    @pytest.fixture(scope="class")
-    def table(self, engine):
-        md = MetaData()
-        tbl = Table(
-            "foo",
-            md,
-            Column("bar", String, comment="column comment"),
-            comment="table comment",
-        )
-        md.create_all(bind=engine)
-
-        yield tbl
-
-        md.drop_all(bind=engine)
-
-    def test_table_comment_reflection(self, inspector: Inspector, table: Table):
-        comment = inspector.get_table_comment(table.name)
-        assert comment == {"text": "table comment"}
-
-    def test_column_comment(self, inspector: Inspector, table: Table):
-        result = inspector.get_columns(table.name)[0].get("comment")
-        assert result == "column comment"
+                conn.execute("DROP TABLE test_has_table;")

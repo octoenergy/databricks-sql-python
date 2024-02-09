@@ -133,11 +133,7 @@ class ThriftBackend:
         #  (defaults to 900)
         # _enable_v3_retries
         # Whether to use the DatabricksRetryPolicy implemented in urllib3
-        # (defaults to True)
-        # _retry_max_redirects
-        #  An integer representing the maximum number of redirects to follow for a request.
-        #  This number must be <= _retry_stop_after_attempts_count.
-        #  (defaults to None)
+        # (defaults to False)
         # max_download_threads
         #  Number of threads for handling cloud fetch downloads. Defaults to 10
 
@@ -145,11 +141,9 @@ class ThriftBackend:
         if kwargs.get("_connection_uri"):
             uri = kwargs.get("_connection_uri")
         elif server_hostname and http_path:
-            uri = "{host}:{port}/{path}".format(
-                host=server_hostname.rstrip("/"), port=port, path=http_path.lstrip("/")
+            uri = "https://{host}:{port}/{path}".format(
+                host=server_hostname, port=port, path=http_path.lstrip("/")
             )
-            if not uri.startswith("https://"):
-                uri = "https://" + uri
         else:
             raise ValueError("No valid connection settings.")
 
@@ -186,26 +180,10 @@ class ThriftBackend:
         self._auth_provider = auth_provider
 
         # Connector version 3 retry approach
-        self.enable_v3_retries = kwargs.get("_enable_v3_retries", True)
-
-        if not self.enable_v3_retries:
-            logger.warning(
-                "Legacy retry behavior is enabled for this connection."
-                " This behaviour is deprecated and will be removed in a future release."
-            )
+        self.enable_v3_retries = kwargs.get("_enable_v3_retries", False)
         self.force_dangerous_codes = kwargs.get("_retry_dangerous_codes", [])
 
         additional_transport_args = {}
-        _max_redirects: Union[None, int] = kwargs.get("_retry_max_redirects")
-
-        if _max_redirects:
-            if _max_redirects > self._retry_stop_after_attempts_count:
-                logger.warn(
-                    "_retry_max_redirects > _retry_stop_after_attempts_count so it will have no affect!"
-                )
-            urllib3_kwargs = {"redirect": _max_redirects}
-        else:
-            urllib3_kwargs = {}
         if self.enable_v3_retries:
             self.retry_policy = databricks.sql.auth.thrift_http_client.DatabricksRetryPolicy(
                 delay_min=self._retry_delay_min,
@@ -214,7 +192,6 @@ class ThriftBackend:
                 stop_after_attempts_duration=self._retry_stop_after_attempts_duration,
                 delay_default=self._retry_delay_default,
                 force_dangerous_codes=self.force_dangerous_codes,
-                urllib3_kwargs=urllib3_kwargs,
             )
 
             additional_transport_args["retry_policy"] = self.retry_policy
@@ -226,11 +203,9 @@ class ThriftBackend:
             **additional_transport_args,  # type: ignore
         )
 
-
         # HACK!
         timeout = THRIFT_SOCKET_TIMEOUT or kwargs.get("_socket_timeout", DEFAULT_SOCKET_TIMEOUT)
         logger.info(f"Setting timeout HACK! to {timeout}")
-
         # setTimeout defaults to 15 minutes and is expected in ms
 
         self._transport.setTimeout(timeout and (float(timeout) * 1000.0))
@@ -251,7 +226,7 @@ class ThriftBackend:
     def _initialize_retry_args(self, kwargs):
         # Configure retries & timing: use user-settings or defaults, and bound
         # by policy. Log.warn when given param gets restricted.
-        for key, (type_, default, min, max) in _retry_policy.items():
+        for (key, (type_, default, min, max)) in _retry_policy.items():
             given_or_default = type_(kwargs.get(key, default))
             bound = _bound(min, max, given_or_default)
             setattr(self, key, bound)
@@ -389,6 +364,7 @@ class ThriftBackend:
 
             error, error_message, retry_delay = None, None, None
             try:
+
                 this_method_name = getattr(method, "__name__")
 
                 logger.debug("Sending request: {}(<REDACTED>)".format(this_method_name))
@@ -401,6 +377,9 @@ class ThriftBackend:
                     self._transport.startRetryTimer()
 
                 response = method(request)
+
+                # Calling `close()` here releases the active HTTP connection back to the pool
+                self._transport.close()
 
                 # We need to call type(response) here because thrift doesn't implement __name__ attributes for thrift responses
                 logger.debug(
@@ -463,10 +442,6 @@ class ThriftBackend:
                 error_message = ThriftBackend._extract_error_message_from_headers(
                     getattr(self._transport, "headers", {})
                 )
-            finally:
-                # Calling `close()` here releases the active HTTP connection back to the pool
-                self._transport.close()
-
             return RequestErrorInfo(
                 error=error,
                 error_message=error_message,
@@ -566,7 +541,7 @@ class ThriftBackend:
             response = self.make_request(self._client.OpenSession, open_session_req)
             self._check_initial_namespace(catalog, schema, response)
             self._check_protocol_version(response)
-            return response
+            return response.sessionHandle
         except:
             self._transport.close()
             raise
@@ -623,10 +598,7 @@ class ThriftBackend:
                 num_rows,
             ) = convert_column_based_set_to_arrow_table(t_row_set.columns, description)
         elif t_row_set.arrowBatches is not None:
-            (
-                arrow_table,
-                num_rows,
-            ) = convert_arrow_based_set_to_arrow_table(
+            (arrow_table, num_rows,) = convert_arrow_based_set_to_arrow_table(
                 t_row_set.arrowBatches, lz4_compressed, schema_bytes
             )
         else:
@@ -807,8 +779,7 @@ class ThriftBackend:
         max_bytes,
         lz4_compression,
         cursor,
-        use_cloud_fetch=True,
-        parameters=[],
+        use_cloud_fetch=False,
     ):
         assert session_handle is not None
 
@@ -833,7 +804,6 @@ class ThriftBackend:
                 "spark.thriftserver.arrowBasedRowSet.timestampAsString": "false"
             },
             useArrowNativeTypes=spark_arrow_types,
-            parameters=parameters,
         )
         resp = self.make_request(self._client.ExecuteStatement, req)
         return self._handle_execute_response(resp, cursor)

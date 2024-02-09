@@ -16,9 +16,7 @@
 #
 # Row class was taken from Apache Spark pyspark.
 
-from typing import Any, Dict, List, Optional, Tuple, Union, TypeVar
-import datetime
-import decimal
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 
 class Row(tuple):
