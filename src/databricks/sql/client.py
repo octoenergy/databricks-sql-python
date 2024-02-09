@@ -1,11 +1,10 @@
-from typing import Dict, Tuple, List, Optional, Any, Union, Sequence
+from typing import Dict, Tuple, List, Optional, Any, Union
 
 import pandas
 import pyarrow
 import requests
 import json
 import os
-import decimal
 
 from databricks.sql import __version__
 from databricks.sql import *
@@ -14,41 +13,16 @@ from databricks.sql.exc import (
     SessionAlreadyClosedError,
     CursorAlreadyClosedError,
 )
-from databricks.sql.thrift_api.TCLIService import ttypes
 from databricks.sql.thrift_backend import ThriftBackend
-from databricks.sql.utils import (
-    ExecuteResponse,
-    ParamEscaper,
-    inject_parameters,
-    transform_paramstyle,
-)
-from databricks.sql.parameters.native import (
-    DbsqlParameterBase,
-    TDbsqlParameter,
-    TParameterDict,
-    TParameterSequence,
-    TParameterCollection,
-    ParameterStructure,
-    dbsql_parameter_from_primitive,
-    ParameterApproach,
-)
-
-
+from databricks.sql.utils import ExecuteResponse, ParamEscaper, inject_parameters
 from databricks.sql.types import Row
 from databricks.sql.auth.auth import get_python_sql_connector_auth_provider
 from databricks.sql.experimental.oauth_persistence import OAuthPersistence
-
-from databricks.sql.thrift_api.TCLIService.ttypes import (
-    TSparkParameter,
-)
-
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_RESULT_BUFFER_SIZE_BYTES = 104857600
 DEFAULT_ARRAY_SIZE = 100000
-
-NO_NATIVE_PARAMS: List = []
 
 
 class Connection:
@@ -61,7 +35,6 @@ class Connection:
         session_configuration: Dict[str, Any] = None,
         catalog: Optional[str] = None,
         schema: Optional[str] = None,
-        _use_arrow_native_complex_types: Optional[bool] = True,
         **kwargs,
     ) -> None:
         """
@@ -75,13 +48,11 @@ class Connection:
                 Http Bearer access token, e.g. Databricks Personal Access Token.
                 Unless if you use auth_type=`databricks-oauth` you need to pass `access_token.
                 Examples:
-                        ```
                          connection = sql.connect(
                             server_hostname='dbc-12345.staging.cloud.databricks.com',
                             http_path='sql/protocolv1/o/6789/12abc567',
                             access_token='dabpi12345678'
                          )
-                        ```
             :param http_headers: An optional list of (k, v) pairs that will be set as Http headers on every request
             :param session_configuration: An optional dictionary of Spark session parameters. Defaults to None.
                 Execute the SQL command `SET -v` to get a full list of available commands.
@@ -89,12 +60,6 @@ class Connection:
             :param schema: An optional initial schema to use. Requires DBR version 9.0+
 
         Other Parameters:
-            use_inline_params: `boolean` | str, optional (default is False)
-                When True, parameterized calls to cursor.execute() will try to render parameter values inline with the
-                query text instead of using native bound parameters supported in DBR 14.1 and above. This connector will attempt to
-                sanitise parameterized inputs to prevent SQL injection.  The inline parameter approach is maintained for
-                legacy purposes and will be deprecated in a future release. When this parameter is `True` you will see
-                a warning log message. To suppress this log message, set `use_inline_params="silent"`.
             auth_type: `str`, optional
                 `databricks-oauth` : to use oauth with fine-grained permission scopes, set to `databricks-oauth`.
                 This is currently in private preview for Databricks accounts on AWS.
@@ -142,7 +107,6 @@ class Connection:
                 own implementation of OAuthPersistence.
 
                 Examples:
-                ```
                         # for development only
                         from databricks.sql.experimental.oauth_persistence import DevOnlyFilePersistence
 
@@ -152,14 +116,8 @@ class Connection:
                             auth_type="databricks-oauth",
                             experimental_oauth_persistence=DevOnlyFilePersistence("~/dev-oauth.json")
                         )
-                ```
-            :param _use_arrow_native_complex_types: `bool`, optional
-                Controls whether a complex type field value is returned as a string or as a native Arrow type. Defaults to True.
-                When True:
-                    MAP is returned as List[Tuple[str, Any]]
-                    STRUCT is returned as Dict[str, Any]
-                    ARRAY is returned as numpy.ndarray
-                When False, complex types are returned as a strings. These are generally deserializable as JSON.
+
+
         """
 
         # Internal arguments in **kwargs:
@@ -190,6 +148,9 @@ class Connection:
         # _disable_pandas
         #  In case the deserialisation through pandas causes any issues, it can be disabled with
         #  this flag.
+        # _use_arrow_native_complex_types
+        # DBR will return native Arrow types for structs, arrays and maps instead of Arrow strings
+        # (True by default)
         # _use_arrow_native_decimals
         # Databricks runtime will return native Arrow types for decimals instead of Arrow strings
         # (True by default)
@@ -228,50 +189,16 @@ class Connection:
             http_path,
             (http_headers or []) + base_headers,
             auth_provider,
-            _use_arrow_native_complex_types=_use_arrow_native_complex_types,
             **kwargs,
         )
 
-        self._open_session_resp = self.thrift_backend.open_session(
+        self._session_handle = self.thrift_backend.open_session(
             session_configuration, catalog, schema
         )
-        self._session_handle = self._open_session_resp.sessionHandle
-        self.protocol_version = self.get_protocol_version(self._open_session_resp)
-        self.use_cloud_fetch = kwargs.get("use_cloud_fetch", True)
+        self.use_cloud_fetch = kwargs.get("use_cloud_fetch", False)
         self.open = True
         logger.info("Successfully opened session " + str(self.get_session_id_hex()))
         self._cursors = []  # type: List[Cursor]
-
-        self.use_inline_params = self._set_use_inline_params_with_warning(
-            kwargs.get("use_inline_params", False)
-        )
-
-    def _set_use_inline_params_with_warning(self, value: Union[bool, str]):
-        """Valid values are True, False, and "silent"
-
-        False: Use native parameters
-        True: Use inline parameters and log a warning
-        "silent": Use inline parameters and don't log a warning
-        """
-
-        if value is False:
-            return False
-
-        if value not in [True, "silent"]:
-            raise ValueError(
-                f"Invalid value for use_inline_params: {value}. "
-                + 'Valid values are True, False, and "silent"'
-            )
-
-        if value is True:
-            logger.warning(
-                "Parameterised queries executed with this client will use the inline parameter approach."
-                "This approach will be deprecated in a future release. Consider using native parameters."
-                "Learn more: https://github.com/databricks/databricks-sql-python/tree/main/docs/parameters.md"
-                'To suppress this warning, set use_inline_params="silent"'
-            )
-
-        return value
 
     def __enter__(self):
         return self
@@ -293,30 +220,6 @@ class Connection:
 
     def get_session_id(self):
         return self.thrift_backend.handle_to_id(self._session_handle)
-
-    @staticmethod
-    def get_protocol_version(openSessionResp):
-        """
-        Since the sessionHandle will sometimes have a serverProtocolVersion, it takes
-        precedence over the serverProtocolVersion defined in the OpenSessionResponse.
-        """
-        if (
-            openSessionResp.sessionHandle
-            and hasattr(openSessionResp.sessionHandle, "serverProtocolVersion")
-            and openSessionResp.sessionHandle.serverProtocolVersion
-        ):
-            return openSessionResp.sessionHandle.serverProtocolVersion
-        return openSessionResp.serverProtocolVersion
-
-    @staticmethod
-    def server_parameterized_queries_enabled(protocolVersion):
-        if (
-            protocolVersion
-            and protocolVersion >= ttypes.TProtocolVersion.SPARK_CLI_SERVICE_PROTOCOL_V8
-        ):
-            return True
-        else:
-            return False
 
     def get_session_id_hex(self):
         return self.thrift_backend.handle_to_hex_id(self._session_handle)
@@ -423,132 +326,6 @@ class Cursor:
                 yield row
         else:
             raise Error("There is no active result set")
-
-    def _determine_parameter_approach(
-        self, params: Optional[TParameterCollection]
-    ) -> ParameterApproach:
-        """Encapsulates the logic for choosing whether to send parameters in native vs inline mode
-
-        If params is None then ParameterApproach.NONE is returned.
-        If self.use_inline_params is True then inline mode is used.
-        If self.use_inline_params is False, then check if the server supports them and proceed.
-            Else raise an exception.
-
-        Returns a ParameterApproach enumeration or raises an exception
-
-        If inline approach is used when the server supports native approach, a warning is logged
-        """
-
-        if params is None:
-            return ParameterApproach.NONE
-
-        if self.connection.use_inline_params:
-            return ParameterApproach.INLINE
-
-        else:
-            return ParameterApproach.NATIVE
-
-    def _all_dbsql_parameters_are_named(self, params: List[TDbsqlParameter]) -> bool:
-        """Return True if all members of the list have a non-null .name attribute"""
-        return all([i.name is not None for i in params])
-
-    def _normalize_tparametersequence(
-        self, params: TParameterSequence
-    ) -> List[TDbsqlParameter]:
-        """Retains the same order as the input list."""
-
-        output: List[TDbsqlParameter] = []
-        for p in params:
-            if isinstance(p, DbsqlParameterBase):
-                output.append(p)  # type: ignore
-            else:
-                output.append(dbsql_parameter_from_primitive(value=p))  # type: ignore
-
-        return output
-
-    def _normalize_tparameterdict(
-        self, params: TParameterDict
-    ) -> List[TDbsqlParameter]:
-        return [
-            dbsql_parameter_from_primitive(value=value, name=name)
-            for name, value in params.items()
-        ]
-
-    def _normalize_tparametercollection(
-        self, params: Optional[TParameterCollection]
-    ) -> List[TDbsqlParameter]:
-        if params is None:
-            return []
-        if isinstance(params, dict):
-            return self._normalize_tparameterdict(params)
-        if isinstance(params, Sequence):
-            return self._normalize_tparametersequence(list(params))
-
-    def _determine_parameter_structure(
-        self,
-        parameters: List[TDbsqlParameter],
-    ) -> ParameterStructure:
-        all_named = self._all_dbsql_parameters_are_named(parameters)
-        if all_named:
-            return ParameterStructure.NAMED
-        else:
-            return ParameterStructure.POSITIONAL
-
-    def _prepare_inline_parameters(
-        self, stmt: str, params: Optional[Union[Sequence, Dict[str, Any]]]
-    ) -> Tuple[str, List]:
-        """Return a statement and list of native parameters to be passed to thrift_backend for execution
-
-        :stmt:
-            A string SQL query containing parameter markers of PEP-249 paramstyle `pyformat`.
-            For example `%(param)s`.
-
-        :params:
-            An iterable of parameter values to be rendered inline. If passed as a Dict, the keys
-            must match the names of the markers included in :stmt:. If passed as a List, its length
-            must equal the count of parameter markers in :stmt:.
-
-        Returns a tuple of:
-            stmt: the passed statement with the param markers replaced by literal rendered values
-            params: an empty list representing the native parameters to be passed with this query.
-                The list is always empty because native parameters are never used under the inline approach
-        """
-
-        escaped_values = self.escaper.escape_args(params)
-        rendered_statement = inject_parameters(stmt, escaped_values)
-
-        return rendered_statement, NO_NATIVE_PARAMS
-
-    def _prepare_native_parameters(
-        self,
-        stmt: str,
-        params: List[TDbsqlParameter],
-        param_structure: ParameterStructure,
-    ) -> Tuple[str, List[TSparkParameter]]:
-        """Return a statement and a list of native parameters to be passed to thrift_backend for execution
-
-        :stmt:
-            A string SQL query containing parameter markers of PEP-249 paramstyle `named`.
-            For example `:param`.
-
-        :params:
-            An iterable of parameter values to be sent natively. If passed as a Dict, the keys
-            must match the names of the markers included in :stmt:. If passed as a List, its length
-            must equal the count of parameter markers in :stmt:. In list form, any member of the list
-            can be wrapped in a DbsqlParameter class.
-
-        Returns a tuple of:
-            stmt: the passed statement` with the param markers replaced by literal rendered values
-            params: a list of TSparkParameters that will be passed in native mode
-        """
-
-        stmt = stmt
-        output = [
-            p.as_tspark_param(named=param_structure == ParameterStructure.NAMED)
-            for p in params
-        ]
-
-        return stmt, output
 
     def _close_and_clear_active_result_set(self):
         try:
@@ -705,72 +482,32 @@ class Cursor:
             )
 
     def execute(
-        self,
-        operation: str,
-        parameters: Optional[TParameterCollection] = None,
+        self, operation: str, parameters: Optional[Dict[str, str]] = None
     ) -> "Cursor":
         """
         Execute a query and wait for execution to complete.
-
-        The parameterisation behaviour of this method depends on which parameter approach is used:
-            - With INLINE mode, parameters are rendered inline with the query text
-            - With NATIVE mode (default), parameters are sent to the server separately for binding
-
-        This behaviour is controlled by the `use_inline_params` argument passed when building a connection.
-
-        The paramstyle for these approaches is different:
-
-        If the connection was instantiated with use_inline_params=False (default), then parameters
-        should be given in PEP-249 `named` paramstyle like :param_name. Parameters passed by positionally
-        are indicated using a `?` in the query text.
-
-        If the connection was instantiated with use_inline_params=True, then parameters
-        should be given in PEP-249 `pyformat` paramstyle like %(param_name)s. Parameters passed by positionally
-        are indicated using a `%s` marker in the query. Note: this approach is not recommended as it can break
-        your SQL query syntax and will be removed in a future release.
-
-        ```python
-        inline_operation = "SELECT * FROM table WHERE field = %(some_value)s"
-        native_operation = "SELECT * FROM table WHERE field = :some_value"
-        parameters = {"some_value": "foo"}
-        ```
-
-        Both will result in the query equivalent to "SELECT * FROM table WHERE field = 'foo'
-        being sent to the server
-
+        Parameters should be given in extended param format style: %(...)<s|d|f>.
+        For example:
+            operation = "SELECT * FROM table WHERE field = %(some_value)s"
+            parameters = {"some_value": "foo"}
+            Will result in the query "SELECT * FROM table WHERE field = 'foo' being sent to the server
         :returns self
         """
-
-        param_approach = self._determine_parameter_approach(parameters)
-        if param_approach == ParameterApproach.NONE:
-            prepared_params = NO_NATIVE_PARAMS
-            prepared_operation = operation
-
-        elif param_approach == ParameterApproach.INLINE:
-            prepared_operation, prepared_params = self._prepare_inline_parameters(
-                operation, parameters
-            )
-        elif param_approach == ParameterApproach.NATIVE:
-            normalized_parameters = self._normalize_tparametercollection(parameters)
-            param_structure = self._determine_parameter_structure(normalized_parameters)
-            transformed_operation = transform_paramstyle(
-                operation, normalized_parameters, param_structure  # type: ignore
-            )
-            prepared_operation, prepared_params = self._prepare_native_parameters(
-                transformed_operation, normalized_parameters, param_structure
+        if parameters is not None:
+            operation = inject_parameters(
+                operation, self.escaper.escape_args(parameters)
             )
 
         self._check_not_closed()
         self._close_and_clear_active_result_set()
         execute_response = self.thrift_backend.execute_command(
-            operation=prepared_operation,
+            operation=operation,
             session_handle=self.connection._session_handle,
             max_rows=self.arraysize,
             max_bytes=self.buffer_size_bytes,
             lz4_compression=self.connection.lz4_compression,
             cursor=self,
             use_cloud_fetch=self.connection.use_cloud_fetch,
-            parameters=prepared_params,
         )
         self.active_result_set = ResultSet(
             self.connection,
@@ -789,10 +526,8 @@ class Cursor:
 
     def executemany(self, operation, seq_of_parameters):
         """
-        Execute the operation once for every set of passed in parameters.
-
-        This will issue N sequential request to the database where N is the length of the provided sequence.
-        No optimizations of the query (like batching) will be performed.
+        Prepare a database operation (query or command) and then execute it against all parameter
+        sequences or mappings found in the sequence ``seq_of_parameters``.
 
         Only the final result set is retained.
 
