@@ -5,6 +5,7 @@ from decimal import Decimal
 import datetime
 import decimal
 from enum import Enum
+import logging
 import lz4.frame
 from typing import Dict, List, Union, Any
 import pyarrow
@@ -18,6 +19,7 @@ from databricks.sql.thrift_api.TCLIService.ttypes import (
 )
 
 BIT_MASKS = [1, 2, 4, 8, 16, 32, 64, 128]
+logger = logging.getLogger(__name__)
 
 
 class ResultSetQueue(ABC):
@@ -71,6 +73,9 @@ class ResultSetQueueFactory(ABC):
             )
             return ArrowQueue(converted_arrow_table, n_valid_rows)
         elif row_set_type == TSparkRowSetType.URL_BASED_SET:
+            logger.debug(
+                f"built cloud fetch queue for {len(t_row_set.resultLinks)} links."
+            )
             return CloudFetchQueue(
                 arrow_schema_bytes,
                 start_row_offset=t_row_set.startRowOffset,
@@ -146,6 +151,9 @@ class CloudFetchQueue(ResultSetQueue):
         self.lz4_compressed = lz4_compressed
         self.description = description
 
+        logger.debug(
+            f"creating cloud fetch queue for {len(result_links)} links and max_download_threads {self.max_download_threads}."
+        )
         self.download_manager = ResultFileDownloadManager(
             self.max_download_threads, self.lz4_compressed
         )
@@ -218,6 +226,9 @@ class CloudFetchQueue(ResultSetQueue):
         # The server rarely prepares the exact number of rows requested by the client in cloud fetch.
         # Subsequently, we drop the extraneous rows in the last file if more rows are retrieved than requested
         if arrow_table.num_rows > downloaded_file.row_count:
+            logger.debug(
+                f"received {arrow_table.num_rows} rows, expected {downloaded_file.row_count} rows. Dropping extraneous rows."
+            )
             self.start_row_index += downloaded_file.row_count
             return arrow_table.slice(0, downloaded_file.row_count)
 
