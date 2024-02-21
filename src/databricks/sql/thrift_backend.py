@@ -15,7 +15,6 @@ import thrift.protocol.TBinaryProtocol
 import thrift.transport.THttpClient
 import thrift.transport.TSocket
 import thrift.transport.TTransport
-
 import urllib3.exceptions
 
 import databricks.sql.auth.thrift_http_client
@@ -23,7 +22,6 @@ from databricks.sql.auth.thrift_http_client import CommandType
 from databricks.sql.auth.authenticators import AuthProvider
 from databricks.sql.thrift_api.TCLIService import TCLIService, ttypes
 from databricks.sql import *
-from databricks.sql.exc import MaxRetryDurationError
 from databricks.sql.thrift_api.TCLIService.TCLIService import (
     Client as TCLIServiceClient,
 )
@@ -206,12 +204,11 @@ class ThriftBackend:
             **additional_transport_args,  # type: ignore
         )
 
-        # setTimeout defaults to 15 minutes and is expected in ms
         # HACK!
         timeout = THRIFT_SOCKET_TIMEOUT or kwargs.get("_socket_timeout", DEFAULT_SOCKET_TIMEOUT)
         logger.info(f"Setting timeout HACK! to {timeout}")
+        # setTimeout defaults to 15 minutes and is expected in ms
 
-        # setTimeout defaults to None (i.e. no timeout), and is expected in ms
         self._transport.setTimeout(timeout and (float(timeout) * 1000.0))
 
         self._transport.setCustomHeaders(dict(http_headers))
