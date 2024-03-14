@@ -2,6 +2,7 @@ from decimal import Decimal
 import errno
 import logging
 import math
+import os
 import time
 import uuid
 import threading
@@ -54,6 +55,10 @@ DATABRICKS_ERROR_OR_REDIRECT_HEADER = "x-databricks-error-or-redirect-message"
 DATABRICKS_REASON_HEADER = "x-databricks-reason-phrase"
 
 TIMESTAMP_AS_STRING_CONFIG = "spark.thriftserver.arrowBasedRowSet.timestampAsString"
+
+# HACK!
+THRIFT_SOCKET_TIMEOUT = os.getenv("THRIFT_SOCKET_TIMEOUT", None)
+
 DEFAULT_SOCKET_TIMEOUT = float(900)
 
 # see Connection.__init__ for parameter descriptions.
@@ -204,7 +209,10 @@ class ThriftBackend:
             **additional_transport_args,  # type: ignore
         )
 
-        timeout = kwargs.get("_socket_timeout", DEFAULT_SOCKET_TIMEOUT)
+        # HACK!
+        timeout = THRIFT_SOCKET_TIMEOUT or kwargs.get("_socket_timeout", DEFAULT_SOCKET_TIMEOUT)
+        logger.info(f"Setting timeout HACK! to {timeout} ms")
+
         # setTimeout defaults to 15 minutes and is expected in ms
         self._transport.setTimeout(timeout and (float(timeout) * 1000.0))
 
