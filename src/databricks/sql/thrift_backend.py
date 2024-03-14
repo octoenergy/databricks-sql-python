@@ -206,9 +206,9 @@ class ThriftBackend:
 
         # HACK!
         timeout = THRIFT_SOCKET_TIMEOUT or kwargs.get("_socket_timeout", DEFAULT_SOCKET_TIMEOUT)
-        logger.info(f"Setting timeout HACK! to {timeout}")
-        # setTimeout defaults to 15 minutes and is expected in ms
+        logger.info(f"Setting timeout HACK! to {timeout} ms")
 
+        # setTimeout defaults to 15 minutes and is expected in ms
         self._transport.setTimeout(timeout and (float(timeout) * 1000.0))
 
         self._transport.setCustomHeaders(dict(http_headers))
